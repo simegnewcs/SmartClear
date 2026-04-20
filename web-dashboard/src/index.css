@@ -1,0 +1,90 @@
+/* 🚀 Tailwind v4 Engine Startup - ይህ የግድ መጀመሪያ መሆን አለበት */
+@import "tailwindcss";
+
+/* 🎨 Theme Variables & Global Reset */
+:root {
+  --sidebar-width: 280px;
+  --primary-blue: #2563eb;
+  --dark-slate: #0f172a;
+  
+  /* Global Typography */
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: #f8fafc; /* slate-50 */
+  color: #0f172a; /* slate-900 */
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer base {
+  /* 🛑 Critical Reset: ቀድሞ የነበረውን የ 1126px መጣበቅ ይፈታል */
+  html, body, #root {
+    @apply m-0 p-0 w-full min-h-screen border-none overflow-x-hidden flex flex-col;
+    max-width: none !important;
+    text-align: left !important; /* ዳሽቦርድ ወደ ግራ መስተካከል አለበት */
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 transition-colors duration-300;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-bold text-slate-900 tracking-tight;
+  }
+}
+
+@layer components {
+  /* 💎 Premium Glassmorphism Card Effect */
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-md border border-white/20 shadow-xl shadow-slate-200/50 rounded-2xl;
+  }
+
+  /* 📏 Custom Scrollbar (Premium Look) */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 rounded-full hover:bg-slate-400 transition-colors;
+  }
+
+  /* 🔘 Dashboard Nav Link Active State */
+  .nav-link-active {
+    @apply bg-blue-600 text-white shadow-lg shadow-blue-600/20 rounded-xl;
+  }
+}
+
+/* 🌀 Smooth Page Entry Animation (UX Polish) */
+.page-fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ⚡ Interactive Element Hover Effect */
+.hover-lift {
+  @apply transition-transform duration-200 hover:-translate-y-1 active:translate-y-0;
+}
+
+/* 🛑 Skeleton Loading Pulse */
+.skeleton {
+  @apply animate-pulse bg-slate-200 rounded;
+}
+
+/* Form Input Focus Ring */
+input:focus, select:focus, textarea:focus {
+  @apply outline-none ring-2 ring-blue-500/20 border-blue-500 transition-all;
+}
