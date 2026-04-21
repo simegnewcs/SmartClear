@@ -56,3 +56,42 @@ exports.verifyExitQR = async (req, res) => {
         res.status(500).json({ success: false, message: 'የሰርቨር ስህተት አጋጥሟል' });
     }
 };
+// backend/src/controllers/guardController.js (add this function)
+exports.verifyStudentById = async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    // Get user details
+    const [users] = await db.execute(
+      'SELECT id, full_name, identifier_id, department, email, phone FROM users WHERE id = ?',
+      [userId]
+    );
+    
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+    
+    // Get clearance status
+    const [clearance] = await db.execute(`
+      SELECT cr.status, cr.completed_at, 
+             (SELECT COUNT(*) FROM staff_clearance_nodes WHERE request_id = cr.id AND 
+              (batch_advisor_status = 'approved' AND chair_holder_status = 'approved' AND
+               library_status = 'approved' AND sports_status = 'approved' AND
+               book_store_status = 'approved' AND housing_status = 'approved' AND
+               regular_budget_status = 'approved' AND registrar_status = 'approved')) as approved_count
+      FROM clearance_requests cr
+      WHERE cr.user_id = ? AND cr.status = 'completed'
+      ORDER BY cr.started_at DESC LIMIT 1
+    `, [userId]);
+    
+    res.json({
+      success: true,
+      user: users[0],
+      clearance_status: clearance[0] || { status: 'pending' }
+    });
+  } catch (error) {
+    console.error('Guard verification error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+

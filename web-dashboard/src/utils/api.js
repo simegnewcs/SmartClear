@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'http://10.62.166.234:5000/api/v1', // የሰርቨርህ IP አድራሻ
+  baseURL: 'http://192.168.137.1:5000/api/v1', // የሰርቨርህ IP አድራሻ
   timeout: 10000,
 });
 

@@ -8,6 +8,9 @@ const staffRoutes = require('./routes/staffRoutes');
 const guardRoutes = require('./routes/guardRoutes');
 const studentRoutes = require('./routes/studentRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+// Then in server.js add:
+ const notificationRoutes = require('./routes/notifications');
+ 
 const app = express();
 
 // --- Middlewares ---
@@ -27,6 +30,7 @@ app.use('/api/v1/staff', staffRoutes);
 app.use('/api/v1/guard', guardRoutes);
 app.use('/api/v1/student', studentRoutes);
 app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/notifications', notificationRoutes);
 // --- Health Check ---
 app.get('/', (req, res) => {
     res.json({

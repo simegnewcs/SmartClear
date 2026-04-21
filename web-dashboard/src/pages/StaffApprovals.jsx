@@ -20,7 +20,7 @@ const StaffApprovals = () => {
     // Format office name for display (e.g., library_status -> LIBRARY)
     const officeName = assignedNode.replace('_status', '').toUpperCase();
 
-    const API_BASE_URL = 'http://10.62.166.234:5000/api/v1/admin';
+    const API_BASE_URL = 'http://192.168.137.1:5000/api/v1/admin';
 
     const fetchRequests = useCallback(async () => {
         setLoading(true);
