@@ -106,3 +106,71 @@ exports.createUser = async (req, res) => {
         res.status(500).json({ success: false, message: 'ምዝገባው አልተሳካም' });
     }
 };
+
+// Add to adminController.js
+
+// Get all staff clearance requests (for Admin)
+exports.getStaffClearanceRequests = async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        cr.id, 
+        cr.request_type, 
+        cr.status, 
+        cr.started_at,
+        cr.completed_at,
+        u.full_name, 
+        u.identifier_id,
+        u.department,
+        u.position
+      FROM clearance_requests cr
+      JOIN users u ON cr.user_id = u.id
+      WHERE u.role IN ('staff', 'department_head')
+      ORDER BY cr.started_at DESC
+    `;
+    
+    const [requests] = await db.execute(query);
+
+    res.status(200).json({
+      success: true,
+      count: requests.length,
+      data: requests
+    });
+  } catch (error) {
+    console.error("Get Staff Requests Error:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch staff clearance requests'
+    });
+  }
+};
+
+// Get staff dashboard stats
+exports.getStaffDashboardStats = async (req, res) => {
+  try {
+    const [totalStaff] = await db.execute('SELECT COUNT(*) as count FROM users WHERE role IN ("staff", "department_head")');
+    const [pending] = await db.execute(`
+      SELECT COUNT(*) as count 
+      FROM clearance_requests cr
+      JOIN users u ON cr.user_id = u.id
+      WHERE u.role IN ("staff", "department_head") AND cr.status = "pending"
+    `);
+    const [completed] = await db.execute(`
+      SELECT COUNT(*) as count 
+      FROM clearance_requests cr
+      JOIN users u ON cr.user_id = u.id
+      WHERE u.role IN ("staff", "department_head") AND cr.status = "completed"
+    `);
+
+    res.status(200).json({
+      success: true,
+      stats: {
+        totalStaff: totalStaff[0].count,
+        pendingRequests: pending[0].count,
+        completedClearances: completed[0].count
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

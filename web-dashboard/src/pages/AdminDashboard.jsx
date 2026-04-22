@@ -23,7 +23,7 @@ const AdminDashboard = () => {
     const userRole = localStorage.getItem('role') || 'staff';
     const assignedNode = localStorage.getItem('assigned_node') || '';
 
-    const API_BASE_URL = 'http://192.168.137.1:5000/api/v1/admin';
+    const API_BASE_URL = 'http://10.189.121.234:5000/api/v1/admin';
 
     const fetchData = useCallback(async () => {
         setLoading(true);
