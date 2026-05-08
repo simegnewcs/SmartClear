@@ -5,7 +5,12 @@ import {
   LogOut, Settings, ChevronDown 
 } from 'lucide-react';
 
-const Navbar = () => {
+const Navbar = ({ 
+  roleLabels = {}, 
+  roleIcons = {},
+  toggleMobileSidebar,
+  isMobileSidebarOpen 
+}) => {
   const navigate = useNavigate();
   
   // 🛡️ መረጃውን ከ localStorage ማንበብ
@@ -31,7 +36,18 @@ const Navbar = () => {
       
       {/* 🔹 Left Side: Brand & Context */}
       <div className="flex items-center gap-4">
-        <button className="lg:hidden p-2 text-slate-600 hover:bg-slate-50 rounded-xl transition-all">
+        {/* 🍔 Mobile Hamburger - Toggles Sidebar */}
+        <button 
+          onClick={toggleMobileSidebar}
+          className={`
+            lg:hidden p-2 rounded-xl transition-all duration-300
+            ${isMobileSidebarOpen 
+              ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30' 
+              : 'text-slate-600 hover:bg-slate-50 hover:text-blue-600'}
+          `}
+          aria-label={isMobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+          title={isMobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+        >
           <Menu size={24} />
         </button>
         <div className="hidden sm:block">

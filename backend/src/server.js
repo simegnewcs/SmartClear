@@ -14,7 +14,24 @@ const adminRoutes = require('./routes/adminRoutes');
 const app = express();
 
 // --- Middlewares ---
-app.use(cors()); // ለዌብ ዳሽቦርዱ ከባክኤንድ ጋር እንዲገናኝ ይፈቅዳል
+// CORS configuration - allow frontend origins
+const corsOptions = {
+    origin: [
+        'http://localhost:5173',      // Vite dev server
+        'http://localhost:3000',      // React dev server
+        'http://127.0.0.1:5173',      // Localhost IP
+        'http://10.161.68.44:5173',   // Current network IP (updated)
+        'http://10.189.121.234:5173', // Previous network IP
+        // Add any other frontend origins here
+    ],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: true,
+    preflightContinue: false,
+    optionsSuccessStatus: 204
+};
+
+app.use(cors(corsOptions));
 app.use(express.json()); // JSON ዳታ ለመቀበል
 app.use(express.urlencoded({ extended: true }));
 

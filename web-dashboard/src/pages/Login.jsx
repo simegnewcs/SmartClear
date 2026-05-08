@@ -33,10 +33,18 @@ const Login = () => {
         localStorage.setItem('assigned_node', response.data.user.assigned_node);
 
         // 🚀 Navigate based on role
-        if (response.data.user.role === 'admin') {
+        const userRole = response.data.user.role;
+        const assignedNode = response.data.user.assigned_node;
+        
+        if (userRole === 'admin') {
           navigate('/admin');
+        } else if (userRole === 'staff' || userRole === 'department_head') {
+          // Staff members go to their approval dashboard
+          // They can only see requests for their assigned node
+          navigate('/approvals');
         } else {
-          navigate('/admin'); // ወይም ለስታፍ ተብሎ የተዘጋጀ ዩአርኤል ካለህ እሱን ተጠቀም
+          // Students and other roles
+          navigate('/unauthorized');
         }
       }
     } catch (err) {

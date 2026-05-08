@@ -26,9 +26,39 @@ const STAFF_NODES = [
   'record_office_status'
 ];
 
-// 1. Initiate Staff Clearance
+// Get list of approving officers (users who can approve)
+exports.getApprovingOfficers = async (req, res) => {
+  try {
+    const [officers] = await db.execute(`
+      SELECT id, full_name, identifier_id, department 
+      FROM users 
+      WHERE role IN ('admin', 'department_head', 'supervisor', 'hr')
+      ORDER BY full_name ASC
+    `);
+    
+    res.json({
+      success: true,
+      data: officers
+    });
+  } catch (error) {
+    console.error("Get Officers Error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch approving officers' 
+    });
+  }
+};
+
+// 1. Initiate Staff Clearance with Approving Officer
 exports.initiateStaffClearance = async (req, res) => {
-  const { user_id, request_type, personal_info } = req.body;
+  const { user_id, request_type, approving_officer_id } = req.body;
+
+  if (!approving_officer_id) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Please select an approving officer' 
+    });
+  }
 
   const connection = await db.getConnection();
   await connection.beginTransaction();
@@ -47,36 +77,26 @@ exports.initiateStaffClearance = async (req, res) => {
       });
     }
 
-    // Update staff personal info if provided
-    if (personal_info) {
-      await connection.execute(
-        `UPDATE users SET 
-          father_name = ?, 
-          grandfather_name = ?, 
-          position = ?, 
-          department = ?
-        WHERE id = ?`,
-        [
-          personal_info.father_name || null,
-          personal_info.grandfather_name || null,
-          personal_info.position || null,
-          personal_info.department || null,
-          user_id
-        ]
-      );
-    }
+    // Get approving officer details
+    const [officer] = await connection.execute(
+      'SELECT full_name FROM users WHERE id = ?',
+      [approving_officer_id]
+    );
 
-    // Create new clearance request
+    // Create new clearance request with initial approval pending
     const [requestResult] = await connection.execute(
-      'INSERT INTO clearance_requests (user_id, request_type, status) VALUES (?, ?, "pending")',
-      [user_id, request_type]
+      `INSERT INTO clearance_requests 
+        (user_id, request_type, status, approving_officer_id, approving_officer_name, initial_approval_status) 
+       VALUES (?, ?, 'pending', ?, ?, 'pending')`,
+      [user_id, request_type, approving_officer_id, officer[0]?.full_name]
     );
 
     const requestId = requestResult.insertId;
 
-    // Insert all 21 nodes as pending
+    // Insert all 21 nodes as PENDING (locked) until initial approval
+    // Using 'pending' instead of 'inactive' to match ENUM constraints
     const nodeColumns = STAFF_NODES.join(', ');
-    const nodePlaceholders = STAFF_NODES.map(() => 'pending').join(', ');
+    const nodePlaceholders = STAFF_NODES.map(() => "'pending'").join(', ');
     
     await connection.execute(
       `INSERT INTO staff_clearance_nodes (request_id, ${nodeColumns}) VALUES (?, ${nodePlaceholders})`,
@@ -87,8 +107,9 @@ exports.initiateStaffClearance = async (req, res) => {
     
     res.status(201).json({
       success: true,
-      message: 'Staff clearance request initiated successfully',
-      requestId: requestId
+      message: 'Staff clearance request submitted. Awaiting approving officer approval.',
+      requestId: requestId,
+      initial_approval_pending: true
     });
 
   } catch (error) {
@@ -103,7 +124,103 @@ exports.initiateStaffClearance = async (req, res) => {
   }
 };
 
-// 2. Update Node Status (for Staff workflow)
+// 2. Approving Officer Approves/Rejects Initial Request
+exports.processInitialApproval = async (req, res) => {
+  const { request_id, action, comments, officer_id } = req.body;
+
+  if (!['approved', 'rejected'].includes(action)) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Invalid action. Must be approved or rejected' 
+    });
+  }
+
+  const connection = await db.getConnection();
+  await connection.beginTransaction();
+
+  try {
+    // Get request details
+    const [request] = await connection.execute(
+      'SELECT * FROM clearance_requests WHERE id = ?',
+      [request_id]
+    );
+
+    if (request.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Clearance request not found' 
+      });
+    }
+
+    if (request[0].initial_approval_status !== 'pending') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'This request has already been processed' 
+      });
+    }
+
+    if (action === 'approved') {
+      // Update request status
+      await connection.execute(
+        `UPDATE clearance_requests 
+         SET initial_approval_status = 'approved', 
+             initial_approval_at = NOW(),
+             initial_approval_comments = ?,
+             status = 'in_progress'
+         WHERE id = ?`,
+        [comments || null, request_id]
+      );
+
+      // Activate all 21 nodes (change from 'inactive' to 'pending')
+      const updateQueries = STAFF_NODES.map(node => 
+        `${node} = 'pending'`
+      ).join(', ');
+      
+      await connection.execute(
+        `UPDATE staff_clearance_nodes SET ${updateQueries} WHERE request_id = ?`,
+        [request_id]
+      );
+
+      res.json({
+        success: true,
+        message: 'Clearance request approved. All 21 offices are now active for approval.',
+        status: 'approved'
+      });
+      
+    } else {
+      // Rejected
+      await connection.execute(
+        `UPDATE clearance_requests 
+         SET initial_approval_status = 'rejected', 
+             initial_approval_at = NOW(),
+             initial_approval_comments = ?,
+             status = 'rejected'
+         WHERE id = ?`,
+        [comments || null, request_id]
+      );
+
+      res.json({
+        success: true,
+        message: 'Clearance request rejected. Staff member has been notified.',
+        status: 'rejected'
+      });
+    }
+
+    await connection.commit();
+
+  } catch (error) {
+    await connection.rollback();
+    console.error("Initial Approval Error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to process approval' 
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// 3. Update Node Status (only allowed after initial approval)
 exports.updateStaffNodeStatus = async (req, res) => {
   const { request_id, column_name, status, comments, approved_by } = req.body;
 
@@ -115,6 +232,27 @@ exports.updateStaffNodeStatus = async (req, res) => {
   }
 
   try {
+    // Check if initial approval has been granted
+    const [request] = await db.execute(
+      'SELECT initial_approval_status, status FROM clearance_requests WHERE id = ?',
+      [request_id]
+    );
+
+    if (request.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Clearance request not found' 
+      });
+    }
+
+    if (request[0].initial_approval_status !== 'approved') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Cannot update nodes: Awaiting initial approval from approving officer',
+        status: 'waiting_for_approval'
+      });
+    }
+
     const query = `
       UPDATE staff_clearance_nodes 
       SET ${column_name} = ?, 
@@ -164,7 +302,7 @@ exports.updateStaffNodeStatus = async (req, res) => {
   }
 };
 
-// 3. Get Staff Clearance Progress
+// 4. Get Staff Clearance Progress (with initial approval status)
 exports.getStaffClearanceProgress = async (req, res) => {
   const { user_id } = req.params;
 
@@ -175,6 +313,11 @@ exports.getStaffClearanceProgress = async (req, res) => {
         r.status as overall_status, 
         r.started_at,
         r.completed_at,
+        r.approving_officer_id,
+        r.approving_officer_name,
+        r.initial_approval_status,
+        r.initial_approval_at,
+        r.initial_approval_comments,
         n.*
       FROM clearance_requests r
       JOIN staff_clearance_nodes n ON r.id = n.request_id
@@ -189,22 +332,32 @@ exports.getStaffClearanceProgress = async (req, res) => {
         success: true,
         message: 'No active clearance request',
         node_details: {},
-        progress: { total: STAFF_NODES.length, approved: 0, percentage: 0 }
+        progress: { total: STAFF_NODES.length, approved: 0, percentage: 0 },
+        initial_approval: { status: 'none', pending: false }
       });
     }
 
     const data = rows[0];
     
     let approvedCount = 0;
+    let activeCount = 0;
     const details = {};
 
     STAFF_NODES.forEach(node => {
-      details[node] = data[node] || 'pending';
-      if (data[node] === 'approved') approvedCount++;
+      const nodeStatus = data[node] || 'pending';
+      details[node] = nodeStatus;
+      if (nodeStatus === 'approved') approvedCount++;
+      if (nodeStatus !== 'inactive') activeCount++;
     });
 
-    const percentage = Math.round((approvedCount / STAFF_NODES.length) * 100);
+    const percentage = data.initial_approval_status === 'approved' 
+      ? Math.round((approvedCount / STAFF_NODES.length) * 100)
+      : 0;
+    
     const isCompleted = data.overall_status === 'completed';
+    const isWaitingForApproval = data.initial_approval_status === 'pending';
+    const isInitialApproved = data.initial_approval_status === 'approved';
+    const isRejected = data.initial_approval_status === 'rejected';
 
     res.json({
       success: true,
@@ -213,10 +366,21 @@ exports.getStaffClearanceProgress = async (req, res) => {
       started_at: data.started_at,
       completed_at: data.completed_at,
       is_completed: isCompleted,
+      initial_approval: {
+        status: data.initial_approval_status,
+        officer_name: data.approving_officer_name,
+        approved_at: data.initial_approval_at,
+        comments: data.initial_approval_comments,
+        is_pending: isWaitingForApproval,
+        is_approved: isInitialApproved,
+        is_rejected: isRejected
+      },
       progress: {
         total_nodes: STAFF_NODES.length,
         approved_nodes: approvedCount,
-        percentage: percentage
+        active_nodes: activeCount,
+        percentage: percentage,
+        is_locked: isWaitingForApproval
       },
       node_details: details
     });
@@ -230,11 +394,118 @@ exports.getStaffClearanceProgress = async (req, res) => {
   }
 };
 
-// 4. Generate Final QR for Staff
+// 5. Get Pending Initial Approvals (for Approving Officers - STAFF ONLY)
+exports.getPendingInitialApprovals = async (req, res) => {
+  const { officer_id } = req.query;
+
+  try {
+    // Only fetch STAFF clearance requests (not student requests)
+    const query = `
+      SELECT 
+        cr.id as request_id,
+        u.full_name as staff_name,
+        u.identifier_id as staff_id,
+        u.department,
+        cr.request_type,
+        cr.started_at,
+        cr.approving_officer_name
+      FROM clearance_requests cr
+      JOIN users u ON cr.user_id = u.id
+      WHERE cr.initial_approval_status = 'pending'
+      AND cr.approving_officer_id = ?
+      AND u.role IN ('staff', 'department_head', 'supervisor')
+      ORDER BY cr.started_at ASC
+    `;
+    
+    const [requests] = await db.execute(query, [officer_id || 0]);
+    
+    res.json({
+      success: true,
+      data: requests,
+      count: requests.length
+    });
+    
+  } catch (error) {
+    console.error("Get Pending Approvals Error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// 6. Get Pending Staff Approvals (for Node Approvers - after initial approval)
+exports.getPendingStaffApprovals = async (req, res) => {
+  const { node_name } = req.query;
+
+  if (!node_name || !STAFF_NODES.includes(node_name)) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Valid node name is required" 
+    });
+  }
+
+  try {
+    const query = `
+      SELECT 
+        cr.id as request_id,
+        u.full_name,
+        u.identifier_id as staff_id,
+        u.department,
+        cr.request_type,
+        cr.started_at,
+        cr.initial_approval_status,
+        sn.${node_name} as status
+      FROM clearance_requests cr
+      JOIN users u ON cr.user_id = u.id
+      JOIN staff_clearance_nodes sn ON cr.id = sn.request_id
+      WHERE sn.${node_name} = 'pending'
+      AND cr.initial_approval_status = 'approved'
+      AND u.role IN ('staff', 'department_head')
+      ORDER BY cr.started_at ASC
+    `;
+    
+    const [requests] = await db.execute(query);
+    res.json({ 
+      success: true, 
+      data: requests,
+      count: requests.length
+    });
+    
+  } catch (error) {
+    console.error("Get Pending Approvals Error:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// 7. Generate Final QR for Staff (only after all nodes approved)
 exports.generateStaffFinalQR = async (req, res) => {
   const { request_id } = req.params;
 
   try {
+    // Check initial approval status
+    const [request] = await db.execute(
+      'SELECT initial_approval_status FROM clearance_requests WHERE id = ?',
+      [request_id]
+    );
+
+    if (request.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Clearance request not found" 
+      });
+    }
+
+    if (request[0].initial_approval_status !== 'approved') {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Cannot generate QR: Awaiting initial approval" 
+      });
+    }
+
     const [rows] = await db.execute(
       `SELECT ${STAFF_NODES.join(', ')} FROM staff_clearance_nodes WHERE request_id = ?`,
       [request_id]
@@ -273,11 +544,9 @@ exports.generateStaffFinalQR = async (req, res) => {
       type: 'staff'
     };
 
-    // Simple encryption (same as mobile app)
     const jsonString = JSON.stringify(qrPayload);
     const encrypted = Buffer.from(jsonString).toString('base64');
 
-    // Save QR code to database
     await db.execute(
       'UPDATE clearance_requests SET final_qr_code = ? WHERE id = ?',
       [encrypted, request_id]
@@ -298,152 +567,427 @@ exports.generateStaffFinalQR = async (req, res) => {
   }
 };
 
-// 5. Get Pending Staff Approvals (for Web Dashboard)
-exports.getPendingStaffApprovals = async (req, res) => {
-  const { node_name } = req.query;
+// ============================================================
+// ROLE-BASED APPROVAL DASHBOARD METHODS
+// For Student Approval Team (8 staff) and Additional Team (21 staff)
+// ============================================================
 
-  if (!node_name || !STAFF_NODES.includes(node_name)) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Valid node name is required" 
-    });
-  }
-
+/**
+ * @desc    Get pending approvals for the logged-in staff member
+ * Staff only sees requests assigned to their node
+ * @route   GET /api/v1/staff/my-pending-approvals
+ */
+exports.getMyPendingApprovals = async (req, res) => {
   try {
+    const staffId = req.user.id;
+    const assignedNode = req.user.assigned_node;
+
+    // Check if staff has a node assignment
+    if (!assignedNode) {
+      return res.status(400).json({
+        success: false,
+        message: 'You are not assigned to any approval node. Contact admin.'
+      });
+    }
+
+    // Get requests for this staff's assigned node
+    // Show both 'pending' (ready to approve) and 'locked' (waiting in workflow)
     const query = `
       SELECT 
         cr.id as request_id,
-        u.full_name,
-        u.identifier_id as staff_id,
-        u.department,
         cr.request_type,
         cr.started_at,
-        sn.${node_name} as status
+        cr.initial_approval_status,
+        cr.initial_approval_at,
+        u.id as applicant_id,
+        u.full_name as applicant_name,
+        u.identifier_id as applicant_id_number,
+        u.department_name as applicant_department,
+        u.role as applicant_role,
+        sn.${assignedNode} as node_status,
+        sn.comments as node_comments
       FROM clearance_requests cr
       JOIN users u ON cr.user_id = u.id
       JOIN staff_clearance_nodes sn ON cr.id = sn.request_id
-      WHERE sn.${node_name} = 'pending'
-      AND u.role IN ('staff', 'department_head')
-      ORDER BY cr.started_at ASC
+      WHERE sn.${assignedNode} IN ('pending', 'locked')
+      AND cr.status IN ('pending', 'in_progress')
+      AND (
+        -- Students don't need initial approval
+        u.role = 'student' 
+        -- Staff need initial approval first
+        OR (u.role IN ('staff', 'department_head') AND cr.initial_approval_status = 'approved')
+      )
+      ORDER BY 
+        CASE sn.${assignedNode}
+          WHEN 'pending' THEN 1
+          WHEN 'locked' THEN 2
+        END,
+        cr.started_at ASC
     `;
-    
+
     const [requests] = await db.execute(query);
-    res.json({ 
-      success: true, 
-      data: requests,
-      count: requests.length
-    });
-    
-  } catch (error) {
-    console.error("Get Pending Approvals Error:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
 
-// 6. Approve Node for Staff
-exports.approveStaffNode = async (req, res) => {
-  const { request_id, node_name, status, comments, staff_id } = req.body;
+    // Get summary stats - count pending (actionable) and locked (waiting)
+    const [stats] = await db.execute(`
+      SELECT 
+        COUNT(*) as total_requests,
+        SUM(CASE WHEN sn.${assignedNode} = 'pending' THEN 1 ELSE 0 END) as pending_now,
+        SUM(CASE WHEN sn.${assignedNode} = 'locked' THEN 1 ELSE 0 END) as locked_waiting,
+        SUM(CASE WHEN u.role = 'student' THEN 1 ELSE 0 END) as student_requests,
+        SUM(CASE WHEN u.role IN ('staff', 'department_head') THEN 1 ELSE 0 END) as staff_requests
+      FROM clearance_requests cr
+      JOIN users u ON cr.user_id = u.id
+      JOIN staff_clearance_nodes sn ON cr.id = sn.request_id
+      WHERE sn.${assignedNode} IN ('pending', 'locked')
+      AND cr.status IN ('pending', 'in_progress')
+      AND (
+        u.role = 'student' 
+        OR (u.role IN ('staff', 'department_head') AND cr.initial_approval_status = 'approved')
+      )
+    `);
 
-  if (!STAFF_NODES.includes(node_name)) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Invalid node name" 
-    });
-  }
-
-  try {
-    const query = `
-      UPDATE staff_clearance_nodes 
-      SET ${node_name} = ?, 
-          comments = ?, 
-          approved_by = ?,
-          last_updated = CURRENT_TIMESTAMP
-      WHERE request_id = ?
-    `;
-    
-    await db.execute(query, [status, comments || null, staff_id || null, request_id]);
-
-    // Check if all nodes are approved
-    const [allNodes] = await db.execute(
-      `SELECT ${STAFF_NODES.join(', ')} FROM staff_clearance_nodes WHERE request_id = ?`,
-      [request_id]
-    );
-
-    if (allNodes.length > 0) {
-      const allApproved = STAFF_NODES.every(node => allNodes[0][node] === 'approved');
+    // Get workflow info for student requests (show locked nodes status)
+    let workflowInfo = null;
+    if (requests.length > 0 && requests[0].applicant_role === 'student') {
+      const [workflow] = await db.execute(`
+        SELECT 
+          batch_advisor_status,
+          chair_holder_status,
+          library_status,
+          sports_status,
+          book_store_status,
+          housing_status,
+          regular_budget_status,
+          registrar_status
+        FROM staff_clearance_nodes
+        WHERE request_id = ?
+      `, [requests[0].request_id]);
       
-      if (allApproved) {
-        await db.execute(
-          'UPDATE clearance_requests SET status = "completed", completed_at = NOW() WHERE id = ?',
-          [request_id]
-        );
+      if (workflow.length > 0) {
+        workflowInfo = {
+          step1_batch_advisor: workflow[0].batch_advisor_status,
+          step2_chair_holder: workflow[0].chair_holder_status,
+          step3_others: {
+            library: workflow[0].library_status,
+            sports: workflow[0].sports_status,
+            book_store: workflow[0].book_store_status,
+            housing: workflow[0].housing_status,
+            cafeteria: workflow[0].regular_budget_status,
+            registrar: workflow[0].registrar_status
+          }
+        };
       }
     }
 
-    res.json({ 
-      success: true, 
-      message: `Node ${node_name} updated to ${status}` 
+    res.json({
+      success: true,
+      staff_info: {
+        id: staffId,
+        assigned_node: assignedNode,
+        node_display_name: assignedNode.replace(/_/g, ' ').replace(/status/g, '').trim()
+      },
+      stats: {
+        total: stats[0].total_requests,
+        pending_now: stats[0].pending_now,
+        locked_waiting: stats[0].locked_waiting,
+        student_requests: stats[0].student_requests,
+        staff_requests: stats[0].staff_requests
+      },
+      workflow: workflowInfo,
+      data: requests,
+      count: requests.length,
+      note: 'Sequential workflow: Batch Advisor → Chair Holder → Others (Parallel)',
+      help: 'Requests marked as LOCKED are waiting for previous approvals in the workflow'
     });
-    
+
   } catch (error) {
-    console.error("Approve Node Error:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
+    console.error("Get My Pending Approvals Error:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pending approvals'
     });
   }
 };
 
-// 7. Get Staff Clearance Summary (for Admin)
-exports.getStaffClearanceSummary = async (req, res) => {
-  try {
-    // Get all staff clearance requests
-    const [requests] = await db.execute(`
-      SELECT 
-        cr.id,
-        u.full_name,
-        u.identifier_id,
-        u.department,
-        cr.request_type,
-        cr.status,
-        cr.started_at,
-        cr.completed_at
-      FROM clearance_requests cr
-      JOIN users u ON cr.user_id = u.id
-      WHERE u.role IN ('staff', 'department_head')
-      ORDER BY cr.started_at DESC
-    `);
+/**
+ * @desc    Approve or reject a clearance request at the staff's assigned node
+ * @route   POST /api/v1/staff/approve-request
+ */
+exports.approveRequest = async (req, res) => {
+  const { request_id, action, remarks } = req.body;
+  const staffId = req.user.id;
+  const assignedNode = req.user.assigned_node;
 
-    // Get statistics
-    const [stats] = await db.execute(`
-      SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected
-      FROM clearance_requests cr
-      JOIN users u ON cr.user_id = u.id
-      WHERE u.role IN ('staff', 'department_head')
-    `);
+  // Validate action
+  if (!['approved', 'rejected', 'correction_needed'].includes(action)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid action. Must be approved, rejected, or correction_needed'
+    });
+  }
+
+  if (!assignedNode) {
+    return res.status(403).json({
+      success: false,
+      message: 'You are not assigned to any approval node'
+    });
+  }
+
+  const connection = await db.getConnection();
+  await connection.beginTransaction();
+
+  try {
+    // Verify the request exists and is pending at this node
+    // Students: no initial approval needed
+    // Staff: require initial_approval_status = 'approved'
+    const [requestCheck] = await connection.execute(
+      `SELECT cr.*, sn.${assignedNode} as node_status, u.full_name as applicant_name, u.role as applicant_role
+       FROM clearance_requests cr
+       JOIN staff_clearance_nodes sn ON cr.id = sn.request_id
+       JOIN users u ON cr.user_id = u.id
+       WHERE cr.id = ? 
+       AND (
+         u.role = 'student'  -- Students don't need initial approval
+         OR (u.role IN ('staff', 'department_head') AND cr.initial_approval_status = 'approved')
+       )`,
+      [request_id]
+    );
+
+    if (requestCheck.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found or not yet approved by supervisor'
+      });
+    }
+
+    if (requestCheck[0].node_status !== 'pending') {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        success: false,
+        message: `This request has already been ${requestCheck[0].node_status}`
+      });
+    }
+
+    // Get staff name for audit
+    const [staffInfo] = await connection.execute(
+      'SELECT full_name FROM users WHERE id = ?',
+      [staffId]
+    );
+    const staffName = staffInfo[0]?.full_name || 'Unknown';
+
+    // Update the node status
+    await connection.execute(
+      `UPDATE staff_clearance_nodes 
+       SET ${assignedNode} = ?, 
+           comments = CONCAT(IFNULL(comments, ''), '\n[${staffName}]: ', ?),
+           last_updated = CURRENT_TIMESTAMP
+       WHERE request_id = ?`,
+      [action === 'correction_needed' ? 'rejected' : action, remarks || 'No remarks', request_id]
+    );
+
+    // If rejected, update overall request status
+    if (action === 'rejected' || action === 'correction_needed') {
+      await connection.execute(
+        `UPDATE clearance_requests 
+         SET status = 'rejected', 
+             completed_at = NOW()
+         WHERE id = ?`,
+        [request_id]
+      );
+    }
+
+    // Log the approval action
+    await connection.execute(
+      `INSERT INTO approval_logs 
+       (request_id, node_name, approver_id, approver_name, action, remarks, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [request_id, assignedNode, staffId, staffName, action, remarks || null]
+    );
+
+    await connection.commit();
+    connection.release();
 
     res.json({
       success: true,
-      data: requests,
-      stats: stats[0],
-      total_nodes: STAFF_NODES.length
+      message: `Request ${action === 'correction_needed' ? 'marked for correction' : action} successfully`,
+      data: {
+        request_id,
+        node: assignedNode,
+        action,
+        processed_by: staffName,
+        processed_at: new Date().toISOString()
+      }
     });
-    
+
   } catch (error) {
-    console.error("Get Staff Summary Error:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
+    await connection.rollback();
+    connection.release();
+    console.error("Approve Request Error:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process approval'
     });
   }
 };
 
-// Export the nodes list for use in routes
+/**
+ * @desc    Get staff dashboard data - summary of their approval activities
+ * @route   GET /api/v1/staff/dashboard
+ */
+exports.getStaffDashboard = async (req, res) => {
+  try {
+    const staffId = req.user.id;
+    const assignedNode = req.user.assigned_node;
+
+    if (!assignedNode) {
+      return res.json({
+        success: true,
+        staff_info: {
+          id: staffId,
+          assigned_node: null,
+          message: 'No node assignment'
+        },
+        stats: {
+          pending: 0,
+          approved_today: 0,
+          total_approved: 0,
+          total_rejected: 0
+        }
+      });
+    }
+
+    // Pending approvals at this node
+    const [pending] = await db.execute(`
+      SELECT COUNT(*) as count 
+      FROM clearance_requests cr
+      JOIN staff_clearance_nodes sn ON cr.id = sn.request_id
+      WHERE sn.${assignedNode} = 'pending'
+      AND cr.initial_approval_status = 'approved'
+      AND cr.status IN ('pending', 'in_progress')
+    `);
+
+    // Approved today by this staff
+    const [approvedToday] = await db.execute(`
+      SELECT COUNT(*) as count 
+      FROM approval_logs
+      WHERE approver_id = ? 
+      AND action = 'approved'
+      AND DATE(created_at) = CURDATE()
+    `, [staffId]);
+
+    // Total approved by this staff
+    const [totalApproved] = await db.execute(`
+      SELECT COUNT(*) as count 
+      FROM approval_logs
+      WHERE approver_id = ? AND action = 'approved'
+    `, [staffId]);
+
+    // Total rejected by this staff
+    const [totalRejected] = await db.execute(`
+      SELECT COUNT(*) as count 
+      FROM approval_logs
+      WHERE approver_id = ? AND action IN ('rejected', 'correction_needed')
+    `, [staffId]);
+
+    // Recent activity
+    const [recentActivity] = await db.execute(`
+      SELECT 
+        al.*,
+        u.full_name as applicant_name,
+        cr.request_type
+      FROM approval_logs al
+      JOIN clearance_requests cr ON al.request_id = cr.id
+      JOIN users u ON cr.user_id = u.id
+      WHERE al.approver_id = ?
+      ORDER BY al.created_at DESC
+      LIMIT 10
+    `, [staffId]);
+
+    res.json({
+      success: true,
+      staff_info: {
+        id: staffId,
+        assigned_node: assignedNode,
+        node_display_name: assignedNode.replace(/_/g, ' ').replace(/status/g, '').trim()
+      },
+      stats: {
+        pending: pending[0].count,
+        approved_today: approvedToday[0].count,
+        total_approved: totalApproved[0].count,
+        total_rejected: totalRejected[0].count
+      },
+      recent_activity: recentActivity
+    });
+
+  } catch (error) {
+    console.error("Staff Dashboard Error:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch dashboard data'
+    });
+  }
+};
+
+/**
+ * @desc    Get approval history for a specific request
+ * @route   GET /api/v1/staff/approval-history/:request_id
+ */
+exports.getApprovalHistory = async (req, res) => {
+  const { request_id } = req.params;
+
+  try {
+    // Check if user can access this request
+    const [requestCheck] = await db.execute(
+      'SELECT user_id FROM clearance_requests WHERE id = ?',
+      [request_id]
+    );
+
+    if (requestCheck.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Staff can only see if their node is involved, admin can see all, owner can see all
+    const canAccess = req.user.role === 'admin' || 
+                      requestCheck[0].user_id === req.user.id ||
+                      req.user.role === 'staff';
+
+    if (!canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const [history] = await db.execute(`
+      SELECT 
+        al.*,
+        u.full_name as approver_name
+      FROM approval_logs al
+      JOIN users u ON al.approver_id = u.id
+      WHERE al.request_id = ?
+      ORDER BY al.created_at DESC
+    `, [request_id]);
+
+    res.json({
+      success: true,
+      data: history,
+      count: history.length
+    });
+
+  } catch (error) {
+    console.error("Approval History Error:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch approval history'
+    });
+  }
+};
+
+// Export the nodes list
 exports.STAFF_NODES = STAFF_NODES;

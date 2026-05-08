@@ -1,8 +1,13 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'http://10.189.121.234:5000/api/v1', // የሰርቨርህ IP አድራሻ
-  timeout: 10000,
+  // Use localhost for local development, or network IP for testing on devices
+  baseURL: 'http://localhost:5000/api/v1',  // Local development
+  // baseURL: 'http://10.161.68.44:5000/api/v1',  // Network IP for device testing
+  timeout: 15000,  // Increased timeout for slower networks
+  headers: {
+    'Content-Type': 'application/json'
+  }
 });
 
 // ለሁሉም ጥያቄዎች JWT Token በራስ-ሰር እንዲላክ ማድረግ
